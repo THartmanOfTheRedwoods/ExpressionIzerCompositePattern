@@ -50,7 +50,7 @@
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.4.1</version>
                 <configuration>
-                    <mainClass>edu.redwoods.Main</mainClass>
+                    <mainClass>Main</mainClass>
                 </configuration>
                 <executions>
                     <execution>
@@ -59,7 +59,8 @@
                             <goal>java</goal>
                         </goals>
                         <configuration>
-                            <mainClass>edu.redwoods.Main</mainClass>
+                            <mainClass>Main</mainClass>
+                            <classpathScope>test</classpathScope>
                             <!-- Optional: if your main class needs additional arguments -->
                             <!-- <arguments> -->
                             <!--     <argument>arg1</argument> -->

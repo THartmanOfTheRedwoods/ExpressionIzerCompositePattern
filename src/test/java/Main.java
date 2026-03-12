@@ -1,4 +1,4 @@
-package edu.redwoods;
+import edu.redwoods.*;
 
 public class Main {
     public static void main(String[] args) {

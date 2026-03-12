@@ -38,7 +38,7 @@ public class ExpressionParserUtil {
         Scanner s = new Scanner(System.in);
         String prompt = "Enter a mathematical expression to simplify ('Q' to Quit): ";
         System.out.print(prompt);
-        while((input = s.nextLine()) != "Q") {
+        while(!(input = s.nextLine().strip()).equalsIgnoreCase("Q")) {
             Expression result = parseExpression(input);
             System.out.println("Parsed: " + result);
             // Now you can simplify it using your existing rules
