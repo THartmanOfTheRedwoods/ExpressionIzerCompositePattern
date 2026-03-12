@@ -8,7 +8,7 @@ public class SimplificationRules {
     private static final List<Rule> RULES = new ArrayList<>();
 
     static {
-        // --- 1. CONSTANT FOLDING (The most basic reduction) ---
+        // 1. CONSTANT FOLDING (Highest priority)
         RULES.add((op, l, r) -> {
             if (l instanceof Constant && r instanceof Constant) {
                 double a = ((Constant) l).getValue();
@@ -17,39 +17,34 @@ public class SimplificationRules {
                     case ADD: return Optional.of(new Constant(a + b));
                     case SUB: return Optional.of(new Constant(a - b));
                     case MUL: return Optional.of(new Constant(a * b));
-                    case DIV: return b != 0 ? Optional.of(new Constant(a / b)) : Optional.empty();
+                    case DIV: return Optional.of(new Constant(b == 0 ? 0 : a / b)); // 0/0 -> 0 per user
                     case POW: return Optional.of(new Constant(Math.pow(a, b)));
                 }
             }
             return Optional.empty();
         });
 
-        // --- 2. YOUR ORIGINAL IDENTITY RULES (Pruning the tree) ---
+        // 2. YOUR ORIGINAL IDENTITY RULES
         RULES.add((op, l, r) -> {
-            // Addition
             if (op == Operator.ADD) {
                 if (l instanceof Constant && ((Constant) l).getValue() == 0) return Optional.of(r);
                 if (r instanceof Constant && ((Constant) r).getValue() == 0) return Optional.of(l);
             }
-            // Subtraction
             if (op == Operator.SUB) {
                 if (r instanceof Constant && ((Constant) r).getValue() == 0) return Optional.of(l);
                 if (l.equals(r)) return Optional.of(new Constant(0));
             }
-            // Multiplication
             if (op == Operator.MUL) {
                 if (l instanceof Constant && ((Constant) l).getValue() == 1) return Optional.of(r);
                 if (r instanceof Constant && ((Constant) r).getValue() == 1) return Optional.of(l);
                 if (l instanceof Constant && ((Constant) l).getValue() == 0) return Optional.of(new Constant(0));
                 if (r instanceof Constant && ((Constant) r).getValue() == 0) return Optional.of(new Constant(0));
             }
-            // Division (Restoring 0/0 -> 0 as requested for your tests)
             if (op == Operator.DIV) {
                 if (l instanceof Constant && ((Constant) l).getValue() == 0) return Optional.of(new Constant(0));
                 if (r instanceof Constant && ((Constant) r).getValue() == 1) return Optional.of(l);
                 if (l.equals(r)) return Optional.of(new Constant(1));
             }
-            // Powers
             if (op == Operator.POW) {
                 if (r instanceof Constant && ((Constant) r).getValue() == 1) return Optional.of(l);
                 if (r instanceof Constant && ((Constant) r).getValue() == 0) return Optional.of(new Constant(1));
@@ -57,74 +52,67 @@ public class SimplificationRules {
             return Optional.empty();
         });
 
-        // --- 3. COMMUTATIVE SORTING (Ensures constants/like-terms meet) ---
-        // Converts (x + 2) + 3 -> x + (2 + 3) so folding can find the constants
-        RULES.add((op, l, r) -> {
-            if (op == Operator.ADD || op == Operator.MUL) {
-                if (l instanceof BinaryExpression && ((BinaryExpression) l).getOp() == op) {
-                    BinaryExpression bl = (BinaryExpression) l;
-                    if (bl.getRight() instanceof Constant && r instanceof Constant) {
-                        return Optional.of(new BinaryExpression(op, bl.getLeft(),
-                                new BinaryExpression(op, bl.getRight(), r)));
-                    }
-                }
-            }
-            return Optional.empty();
-        });
-
-        // --- 4. POWER RULES (x^a * x^b -> x^(a+b)) ---
+        // 3. POWER ALGEBRA: x^a * x^b -> x^(a+b)
         RULES.add((op, l, r) -> {
             if (op == Operator.MUL && l instanceof BinaryExpression && r instanceof BinaryExpression) {
-                BinaryExpression lp = (BinaryExpression) l;
-                BinaryExpression rp = (BinaryExpression) r;
-                if (lp.getOp() == Operator.POW && rp.getOp() == Operator.POW && lp.getLeft().equals(rp.getLeft())) {
-                    return Optional.of(new BinaryExpression(Operator.POW, lp.getLeft(),
-                            new BinaryExpression(Operator.ADD, lp.getRight(), rp.getRight())));
-                }
+                BinaryExpression lp = (BinaryExpression) l, rp = (BinaryExpression) r;
+                if (lp.getOp() == Operator.POW && rp.getOp() == Operator.POW && lp.getLeft().equals(rp.getLeft()))
+                    return Optional.of(new BinaryExpression(Operator.POW, lp.getLeft(), new BinaryExpression(Operator.ADD, lp.getRight(), rp.getRight())));
             }
             return Optional.empty();
         });
 
-        // --- 5. EXPANSION (Moves expression toward Sum of Products) ---
+        // 4. ASSOCIATIVITY & COMMUTATIVITY (The key to your failing case)
+        RULES.add((op, l, r) -> {
+            // Sorting: Move constants/variables to a predictable order
+            if ((op == Operator.ADD || op == Operator.MUL) && PolynomialUtility.getRank(l) > PolynomialUtility.getRank(r))
+                return Optional.of(new BinaryExpression(op, r, l));
+
+            // Rotations: (A + B) - C -> A + (B - C)
+            if (op == Operator.SUB && l instanceof BinaryExpression && ((BinaryExpression)l).getOp() == Operator.ADD) {
+                return Optional.of(new BinaryExpression(Operator.ADD, ((BinaryExpression)l).getLeft(),
+                        new BinaryExpression(Operator.SUB, ((BinaryExpression)l).getRight(), r)));
+            }
+            // Rotations: A + (B - C) -> (A - C) + B
+            if (op == Operator.ADD && r instanceof BinaryExpression && ((BinaryExpression)r).getOp() == Operator.SUB) {
+                return Optional.of(new BinaryExpression(Operator.ADD,
+                        new BinaryExpression(Operator.SUB, l, ((BinaryExpression)r).getRight()), ((BinaryExpression)r).getLeft()));
+            }
+            return Optional.empty();
+        });
+
+        // 5. EXPANSION (Distribution): a(b+c) -> ab + ac
         RULES.add((op, l, r) -> {
             if (op == Operator.MUL) {
-                if (r instanceof BinaryExpression && ((BinaryExpression) r).getOp() == Operator.ADD) {
-                    return Optional.of(new BinaryExpression(Operator.ADD,
-                            new BinaryExpression(Operator.MUL, l, ((BinaryExpression) r).getLeft()),
-                            new BinaryExpression(Operator.MUL, l, ((BinaryExpression) r).getRight())));
-                }
-                if (l instanceof BinaryExpression && ((BinaryExpression) l).getOp() == Operator.ADD) {
-                    return Optional.of(new BinaryExpression(Operator.ADD,
-                            new BinaryExpression(Operator.MUL, ((BinaryExpression) l).getLeft(), r),
-                            new BinaryExpression(Operator.MUL, ((BinaryExpression) l).getRight(), r)));
-                }
+                if (r instanceof BinaryExpression && ((BinaryExpression) r).getOp() == Operator.ADD)
+                    return Optional.of(new BinaryExpression(Operator.ADD, new BinaryExpression(Operator.MUL, l, ((BinaryExpression) r).getLeft()), new BinaryExpression(Operator.MUL, l, ((BinaryExpression) r).getRight())));
+                if (l instanceof BinaryExpression && ((BinaryExpression) l).getOp() == Operator.ADD)
+                    return Optional.of(new BinaryExpression(Operator.ADD, new BinaryExpression(Operator.MUL, ((BinaryExpression) l).getLeft(), r), new BinaryExpression(Operator.MUL, ((BinaryExpression) l).getRight(), r)));
             }
             return Optional.empty();
         });
 
-        // --- 6. COLLECTION (Combine Like Terms: 2x + x -> 3x) ---
+        // 6. COLLECTION: 2x + 3x -> 5x
         RULES.add((op, l, r) -> {
             if (op == Operator.ADD || op == Operator.SUB) {
-                Expression baseL = PolynomialUtility.getBase(l);
-                Expression baseR = PolynomialUtility.getBase(r);
-                if (baseL.equals(baseR) && !(baseL instanceof Constant)) {
-                    double cL = PolynomialUtility.getCoefficient(l);
-                    double cR = PolynomialUtility.getCoefficient(r);
-                    double res = (op == Operator.ADD) ? (cL + cR) : (cL - cR);
-                    return Optional.of(new BinaryExpression(Operator.MUL, new Constant(res), baseL));
+                Expression bL = PolynomialUtility.getBase(l), bR = PolynomialUtility.getBase(r);
+                if (bL.equals(bR) && !(bL instanceof Constant)) {
+                    double cL = PolynomialUtility.getCoefficient(l), cR = PolynomialUtility.getCoefficient(r);
+                    return Optional.of(new BinaryExpression(Operator.MUL, new Constant(op == Operator.ADD ? cL + cR : cL - cR), bL));
                 }
             }
             return Optional.empty();
         });
 
-        // --- 7. CANCELLATION (Factoring logic used ONLY for Division) ---
+        // 7. CANCELLATION (Factor logic only used for division)
         RULES.add((op, l, r) -> {
             if (op == Operator.DIV) {
                 return PolynomialUtility.getGCF(l, r).map(gcf -> {
-                    // This is a simplified "Divide out the GCF" rule
-                    // Normally you'd divide both sides by GCF, here we handle the simple case
                     if (l.equals(gcf) && r.equals(gcf)) return new Constant(1);
-                    return null; // Logic for partial division would go here
+                    // Distribution of division: (A + B) / C -> A/C + B/C
+                    if (l instanceof BinaryExpression && ((BinaryExpression)l).getOp() == Operator.ADD)
+                        return new BinaryExpression(Operator.ADD, new BinaryExpression(Operator.DIV, ((BinaryExpression)l).getLeft(), r), new BinaryExpression(Operator.DIV, ((BinaryExpression)l).getRight(), r));
+                    return null;
                 });
             }
             return Optional.empty();
