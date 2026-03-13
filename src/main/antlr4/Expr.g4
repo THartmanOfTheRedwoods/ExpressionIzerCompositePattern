@@ -8,14 +8,14 @@ import edu.redwoods.*;
 // 1. ADD / SUB
 expr returns [Expression value]
     : l=multExpr { $value = $l.value; }
-      ( '+' r=multExpr { $value = new BinaryExpression(Operator.ADD, $value, $r.value); }
+      ( '+' r=multExpr { $value = new NaryExpression(Operator.ADD, $value, $r.value); }
       | '-' r=multExpr { $value = new BinaryExpression(Operator.SUB, $value, $r.value); }
       )* ;
 
 // 2. MUL / DIV
 multExpr returns [Expression value]
     : l=unary { $value = $l.value; }
-      ( '*' r=unary { $value = new BinaryExpression(Operator.MUL, $value, $r.value); }
+      ( '*' r=unary { $value = new NaryExpression(Operator.MUL, $value, $r.value); }
       | '/' r=unary { $value = new BinaryExpression(Operator.DIV, $value, $r.value); }
       )* ;
 
