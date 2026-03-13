@@ -1,5 +1,7 @@
 package edu.redwoods;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -124,6 +126,19 @@ public class BinaryExpression implements Expression {
             double b = ((Constant) base).getValue();
             if (b == 0.0) return new Constant(0);   // 0^x = 0  (x ≠ 0 guarded by fold above)
             if (b == 1.0) return new Constant(1);   // 1^x = 1
+        }
+        // Expand small integer powers: (a + b)^n -> (a + b) * (a + b) ...
+        if (exp instanceof Constant && base instanceof NaryExpression && ((NaryExpression)base).getOp() == Operator.ADD) {
+            double e = ((Constant) exp).getValue();
+            // Only expand if it's a positive integer exponent (e.g., ^2, ^3)
+            if (e > 1 && e == Math.floor(e)) {
+                List<Expression> expandedFactors = new ArrayList<>();
+                for (int i = 0; i < (int) e; i++) {
+                    expandedFactors.add(base);
+                }
+                // Hand it over to the MUL engine which already knows how to FOIL!
+                return new NaryExpression(Operator.MUL, expandedFactors).simplify();
+            }
         }
         // Power-of-a-power: (x^a)^b → x^(a·b)
         if (base instanceof BinaryExpression) {
