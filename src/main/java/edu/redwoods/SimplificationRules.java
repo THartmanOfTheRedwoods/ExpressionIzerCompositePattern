@@ -30,6 +30,34 @@ public class SimplificationRules {
     }
 
     /**
+     * Strips a leading numeric coefficient from a product, returning the
+     * symbolic (non-constant) factor.  Used by the coefficient-aware MUL rule.
+     * Examples:  3*x → x | x*3 → x | x^2 → x^2 | x → x
+     */
+    private static double extractCoeff(Expression e) {
+        if (e instanceof BinaryExpression) {
+            BinaryExpression be = (BinaryExpression) e;
+            if (be.getOp() == Operator.MUL) {
+                if (be.getLeft()  instanceof Constant) return ((Constant) be.getLeft()).getValue();
+                if (be.getRight() instanceof Constant) return ((Constant) be.getRight()).getValue();
+            }
+        }
+        return 1.0;
+    }
+
+    /** Companion to extractCoeff — returns the non-constant factor (or e itself). */
+    private static Expression extractSymbol(Expression e) {
+        if (e instanceof BinaryExpression) {
+            BinaryExpression be = (BinaryExpression) e;
+            if (be.getOp() == Operator.MUL) {
+                if (be.getLeft()  instanceof Constant) return be.getRight();
+                if (be.getRight() instanceof Constant) return be.getLeft();
+            }
+        }
+        return e;
+    }
+
+    /**
      * Extracts the numeric coefficient from a term.
      * Examples:  3*x -> 3.0 | x*3 -> 3.0 | x -> 1.0 | x^2 -> 1.0
      */
@@ -171,19 +199,38 @@ public class SimplificationRules {
         });
 
         // ===================================================================
-        // RULE 4: POWER RULES
-        //   x^a * x^b  ->  x^(a+b)
-        //   (x^a)^b    ->  x^(a*b)
+        // RULE 4: POWER RULES  (coefficient-aware)
+        //
+        // ORIGINAL PROBLEM:
+        //   getBase(2*x) returns (2*x) - the MUL wrapper hides the shared x.
+        //   getBase(3*x) returns (3*x) - likewise.
+        //   So (2*x)*(3*x) was never recognized as same-base, producing the
+        //   stuck node that caused (2x+1)(3x-1) to not fully simplify.
+        //
+        // FIX: strip any leading numeric coefficient first with extractCoeff /
+        //   extractSymbol, then compare the symbolic part's base via getBase.
+        //   This generalises the original x*x case (coefficients are both 1)
+        //   and correctly handles (c1*x^a)*(c2*x^b) -> (c1·c2)*x^(a+b).
+        //
+        // Guard: powBaseL must not be a Constant - Rule 1 owns constant*constant.
         // ===================================================================
         RULES.add((op, l, r) -> {
             if (op == Operator.MUL) {
-                Expression baseL = getBase(l);
-                Expression baseR = getBase(r);
-                if (baseL.equals(baseR)) {
-                    return Optional.of(new BinaryExpression(Operator.POW, baseL,
-                            new BinaryExpression(Operator.ADD, getExp(l), getExp(r))));
+                double   cL    = extractCoeff(l);   Expression symL = extractSymbol(l);
+                double   cR    = extractCoeff(r);   Expression symR = extractSymbol(r);
+                Expression powBaseL = getBase(symL);
+                Expression powBaseR = getBase(symR);
+                if (powBaseL.equals(powBaseR) && !(powBaseL instanceof Constant)) {
+                    double     newCoeff = cL * cR;
+                    Expression newExp   = new BinaryExpression(Operator.ADD, getExp(symL), getExp(symR));
+                    Expression powered  = new BinaryExpression(Operator.POW, powBaseL, newExp);
+                    Expression result   = (newCoeff == 1.0)
+                            ? powered
+                            : new BinaryExpression(Operator.MUL, new Constant(newCoeff), powered);
+                    return Optional.of(result);
                 }
             }
+            // (x^a)^b -> x^(a*b)
             if (op == Operator.POW && l instanceof BinaryExpression) {
                 BinaryExpression bl = (BinaryExpression) l;
                 if (bl.getOp() == Operator.POW) {
@@ -195,14 +242,14 @@ public class SimplificationRules {
         });
 
         // ===================================================================
-        // RULE 5: ASSOCIATIVITY NORMALIZATION
+        // RULE 5: ASSOCIATIVITY NORMALIZATION  <- KEY BUG FIX
         //
-        // BLURB on how this became to be:
+        // WHY THIS IS NEEDED:
         //   Distribution is order-sensitive.  When we simplify (x-1)*(x+1):
         //     Rule 3 sees r=(x+1) is ADD  ->  expands to  (x-1)*x + (x-1)*1
         //     After inner simplification   ->  (x²-x) + (x-1)
-        //   My previous cancellation rule kenw "(A-B)+B -> A", but here B=x
-        //   and the right operand is "(x-1)", not "x", so it can't match.
+        //   My previous cancellation rule knew "(A-B)+B -> A", but here B=x
+        //   and the right operand is "(x-1)", not "x" - so it can't match.
         //
         //   Converting to left-associative form first brings the cancellable
         //   pair "(x²-x) + x" into adjacent position where Rule 7 fires:
@@ -236,7 +283,92 @@ public class SimplificationRules {
         });
 
         // ===================================================================
-        // RULE 6: LIKE-TERM COEFFICIENT MERGING
+        // RULE 5.5: LIKE-TERM EXTRACTION FROM OUTER SUBTRACTION
+        //
+        // ORIGINAL PROBLEM:
+        //   After Rule 4★ reduces (2x)*(3x) to 6x², distribution leaves:
+        //     (6x² + 3x) - 2x
+        //   Rule 7 checks whether 3x or 6x² equals 2x exactly — they don't.
+        //   Rule 6 checks the top-level operands (6x²+3x) and 2x — the left
+        //   is a compound ADD, not a bare term, so no match.
+        //   The like-term pair (3x, 2x) is stuck one level too deep.
+        //
+        // FIX: Pattern  (A + B) - C  where termBase(B) == termBase(C)
+        //      Rewrite:  A + (B - C)
+        //   This pulls B and C together so Rule 6 can merge them during
+        //   child-simplification of the new ADD node.
+        //
+        // LOOP-SAFETY PROOF (why this cannot cycle with Rule 5):
+        //   • We return  ADD(A, SUB(B, C)).
+        //   • BinaryExpression.simplify() recurses on children first (post-order).
+        //   • SUB(B, C) is simplified by Rule 6 → single merged term T.
+        //   • The outer ADD now sees ADD(A, T) where T is NOT a SUB node.
+        //   • Rule 5 requires the right operand to be a SUB — it cannot fire.
+        //   • A cycle is structurally impossible once Rule 6 has consumed (B-C).
+        // ===================================================================
+        RULES.add((op, l, r) -> {
+            if (op == Operator.SUB && l instanceof BinaryExpression) {
+                BinaryExpression bl = (BinaryExpression) l;
+                if (bl.getOp() == Operator.ADD) {
+                    Expression B = bl.getRight();
+                    Expression tbB = getTermBase(B);
+                    Expression tbC = getTermBase(r);
+                    if (tbB != null && tbB.equals(tbC)) {
+                        return Optional.of(new BinaryExpression(Operator.ADD,
+                                bl.getLeft(),
+                                new BinaryExpression(Operator.SUB, B, r)));
+                    }
+                }
+            }
+            return Optional.empty();
+        });
+
+        // ===================================================================
+        // RULE 5.6: LIKE-TERM EXTRACTION FROM OUTER ADDITION  ← NEW
+        //
+        // PROBLEM THIS SOLVES:
+        //   Distribution of (3x-1)*(2x+1) produces, after child-simplification:
+        //     (6x² - 2x) + 3x
+        //   Rule 5   requires right operand to be a SUB  — right=3x, miss.
+        //   Rule 5.5 requires op to be SUB with ADD left  — op=ADD here, miss.
+        //   Rule 6   requires both top-level operands to be bare terms
+        //              — left=(6x²-2x) is a compound SUB, termBase=null, miss.
+        //   The like-term pair (2x inside the SUB, and 3x on the right) is
+        //   one level too deep for any existing rule to reach.
+        //
+        // FIX: Pattern  (A - B) + C  where termBase(B) == termBase(C)
+        //      Rewrite:  A + (C - B)
+        //   This is the exact mirror of Rule 5.5, handling SUB-left under ADD
+        //   instead of ADD-left under SUB.
+        //   (6x²-2x)+3x  →  6x²+(3x-2x)  →  Rule 6  →  6x²+x
+        //
+        // LOOP-SAFETY PROOF:
+        //   • We return ADD(A, SUB(C, B)).
+        //   • BinaryExpression.simplify() recurses on children first (post-order).
+        //   • SUB(C, B) is simplified by Rule 6 → single merged term T.
+        //   • The outer ADD now sees ADD(A, T) where T is NOT a SUB node.
+        //   • Rule 5 requires right to be SUB  — T is not, so it cannot fire.
+        //   • Rule 5.6 requires left to be SUB  — left=A is not (it's the quadratic
+        //     term), so it cannot fire again either.
+        //   • A cycle is structurally impossible once Rule 6 has consumed (C-B).
+        // ===================================================================
+        RULES.add((op, l, r) -> {
+            if (op == Operator.ADD && l instanceof BinaryExpression) {
+                BinaryExpression bl = (BinaryExpression) l;
+                if (bl.getOp() == Operator.SUB) {
+                    Expression B   = bl.getRight();
+                    Expression tbB = getTermBase(B);
+                    Expression tbC = getTermBase(r);
+                    if (tbB != null && tbB.equals(tbC)) {
+                        return Optional.of(new BinaryExpression(Operator.ADD,
+                                bl.getLeft(),
+                                new BinaryExpression(Operator.SUB, r, B)));
+                    }
+                }
+            }
+            return Optional.empty();
+        });
+
         //   Recognizes terms with the same symbolic base and merges their
         //   numeric coefficients:
         //     n*x ± m*x  ->  (n±m)*x
