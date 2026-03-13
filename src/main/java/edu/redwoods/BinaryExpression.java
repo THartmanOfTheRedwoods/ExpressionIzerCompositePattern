@@ -29,20 +29,18 @@ public class BinaryExpression implements Expression {
 
     @Override
     public Expression simplify() {
-        // Post‑order: simplify children first
         Expression simplifiedLeft = left.simplify();
         Expression simplifiedRight = right.simplify();
 
-        // Try to apply a simplification rule
         for (Rule rule : SimplificationRules.getRules()) {
             Optional<Expression> result = rule.apply(op, simplifiedLeft, simplifiedRight);
             if (result.isPresent()) {
-                // Recursively simplify the result (may enable further rules)
-                return result.get().simplify();
+                Expression next = result.get();
+                // Prevent infinite loop if rule returns an equivalent structure
+                if (next.equals(this)) return next;
+                return next.simplify();
             }
         }
-
-        // No rule applied: return a new node with the (already simplified) children
         return new BinaryExpression(op, simplifiedLeft, simplifiedRight);
     }
 
